@@ -29,10 +29,17 @@ Dia forces a reload. Kokoro and OpenAI are always available.
 ## Setup
 
 Each engine runs in its own `uv` virtual environment (`venv-*/`) because their
-dependencies conflict and cannot share an interpreter. The venvs and downloaded model
-weights are gitignored and must be recreated on a fresh clone. A `setup.sh` to recreate
-the venvs and refetch model weights is on the roadmap; for now they are provisioned by
-hand per engine.
+dependencies conflict and cannot share an interpreter. The venvs and the Kokoro model
+weights are gitignored, so recreate them on a fresh clone with:
+
+```sh
+./setup.sh
+```
+
+This rebuilds each engine's venv from the committed lockfiles in `requirements/` and
+downloads the Kokoro weights into `models/`. The Chatterbox, XTTS, and Dia weights
+lazy-download from Hugging Face on first generate. Run `./setup.sh --help` for options
+(`--with-orpheus`, `--force`, `--venvs-only`, `--models-only`).
 
 Provide an OpenAI key for the OpenAI tab in any of these (checked in order):
 
@@ -69,6 +76,5 @@ secure context. Otherwise the in-browser mic for voice cloning is disabled.
 
 ## Roadmap
 
-- `setup.sh` to recreate venvs and refetch models on a fresh clone.
 - An Orpheus tab (`venv-orpheus` is installed; needs a worker plus a Turing / bf16
-  shakedown).
+  shakedown). `./setup.sh --with-orpheus` already rebuilds the venv.
