@@ -1,0 +1,19 @@
+# Python virtual environments (large; recreate via setup, never commit)
+venv-*/
+__pycache__/
+*.pyc
+
+# Downloaded model weights (multi-GB; refetched on setup)
+models/
+
+# Generated audio and runtime logs
+out/
+logs/
+*.wav
+
+# Secrets
+.openai_key
+.api-keys
+
+# Local editor / tool settings
+.claude/settings.local.json
