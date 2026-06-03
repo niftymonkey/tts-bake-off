@@ -119,8 +119,8 @@ class Worker:
 WORKERS = {name: Worker(name, cfg) for name, cfg in ENGINES.items()}
 
 
-def _out_path(engine):
-    return f"{OUT}/ui-{engine}-{next(_counter)}.wav"
+def _out_path(engine, ext="wav"):
+    return f"{OUT}/ui-{engine}-{next(_counter)}.{ext}"
 
 
 def _run(engine, req):
@@ -162,16 +162,60 @@ def gen_dia(text):
 OPENAI_VOICES = ["alloy", "ash", "ballad", "coral", "echo", "fable",
                  "nova", "onyx", "sage", "shimmer", "verse"]
 
+# (label, voice_id) pairs, curated to the conversational / warm / articulate realm.
+# Paste any other voice ID into the tab's custom-ID box.
+# Cartesia voices are from its library (works on any plan).
+CARTESIA_VOICES = [
+    ("Cole - Clear Communicator", "3e39e9a5-585c-4f5f-bac6-5e4905c51095"),
+    ("Daniel - Modern Assistant", "47c38ca4-5f35-497b-b1a3-415245fb35e1"),
+    ("Theo - Modern Narrator", "79f8b5fb-2cc8-479a-80df-29f7a7cf1a3e"),
+    ("Skylar - Friendly Guide", "db6b0ed5-d5d3-463d-ae85-518a07d3c2b4"),
+    ("Corey - Supportive Buddy", "630ed21c-2c5c-41cf-9d82-10a7fd668370"),
+    ("Archie - Approachable Mate", "ef191366-f52f-447a-a398-ed8c0f2943a1"),
+    ("Katie - Friendly Fixer", "f786b574-daa5-4673-aa0c-cbe3e8534c02"),
+    ("Caroline - Southern Guide", "f9836c6e-a0bd-460e-9d3c-f7299fa60f94"),
+    ("Cathy - Coworker", "e8e5fffb-252c-436d-b842-8879b84445b6"),
+    ("Ronald - Thinker", "5ee9feff-1265-424a-9d7f-8e4d431a12c7"),
+]
 
-def _openai_key():
-    for var in ("OPENAI_API_KEY", "OPEN_AI_TTS_KEY"):
+# ElevenLabs free plans cannot use library voices via the API (402 paid_plan_required),
+# so these are all premade account voices, picked for warm/conversational/articulate tone.
+ELEVENLABS_VOICES = [
+    ("Brian - Deep, Comforting", "nPczCjzI2devNBz1zQrb"),
+    ("Chris - Charming, Down-to-Earth", "iP95p4xoKVk53GoZ742B"),
+    ("Eric - Smooth, Trustworthy", "cjVigY5qzO86Huf0OWal"),
+    ("Will - Relaxed Optimist", "bIHbv24MWmeRgasZH58o"),
+    ("George - Warm Storyteller", "JBFqnCBsd6RMkjVDRZzb"),
+    ("Sarah - Reassuring, Confident", "EXAVITQu4vr4xnSDxMaL"),
+    ("Bella - Professional, Warm", "hpp4J3VqNfWAUOO0d1Us"),
+    ("Matilda - Knowledgeable, Professional", "XrExE9yKIg1WjnnlVkGX"),
+    ("Daniel - Steady Broadcaster", "onwK4e9ZLuTAKqWW03F9"),
+    ("River - Relaxed, Informative", "SAz9YHcvj6GT2YYXdXww"),
+]
+
+
+def _provider_key(env_names, key_filename):
+    """Resolve a cloud provider key from env vars (in order), then a key file."""
+    for var in env_names:
         key = os.environ.get(var)
         if key:
             return key.strip()
-    path = f"{BAKE}/.openai_key"
+    path = f"{BAKE}/{key_filename}"
     if os.path.exists(path):
         return open(path).read().strip()
     return None
+
+
+def _openai_key():
+    return _provider_key(("OPENAI_API_KEY", "OPEN_AI_TTS_KEY"), ".openai_key")
+
+
+def _cartesia_key():
+    return _provider_key(("CARTESIA_API_KEY",), ".cartesia_key")
+
+
+def _elevenlabs_key():
+    return _provider_key(("ELEVENLABS_API_KEY",), ".elevenlabs_key")
 
 
 def gen_openai(text, voice, instructions):
@@ -192,6 +236,59 @@ def gen_openai(text, voice, instructions):
             resp.stream_to_file(out)
     except Exception as e:
         raise gr.Error(f"OpenAI TTS failed: {e}")
+    return out
+
+
+# --- Cartesia (cloud, in-process) ---
+
+
+def gen_cartesia(text, voice, custom_voice):
+    if not text.strip():
+        raise gr.Error("Enter some text first.")
+    key = _cartesia_key()
+    if not key:
+        raise gr.Error("No Cartesia key found. Set CARTESIA_API_KEY (or put it in .cartesia_key) and restart.")
+    voice_id = (custom_voice or "").strip() or voice
+    from cartesia import Cartesia
+    client = Cartesia(api_key=key)
+    out = _out_path("cartesia", "wav")
+    try:
+        resp = client.tts.generate(
+            model_id="sonic-3.5",
+            transcript=text,
+            voice={"mode": "id", "id": voice_id},
+            output_format={"container": "wav", "encoding": "pcm_f32le", "sample_rate": 44100},
+        )
+        resp.write_to_file(out)
+    except Exception as e:
+        raise gr.Error(f"Cartesia TTS failed: {e}")
+    return out
+
+
+# --- ElevenLabs (cloud, in-process) ---
+
+
+def gen_elevenlabs(text, voice, custom_voice):
+    if not text.strip():
+        raise gr.Error("Enter some text first.")
+    key = _elevenlabs_key()
+    if not key:
+        raise gr.Error("No ElevenLabs key found. Set ELEVENLABS_API_KEY (or put it in .elevenlabs_key) and restart.")
+    voice_id = (custom_voice or "").strip() or voice
+    from elevenlabs.client import ElevenLabs
+    client = ElevenLabs(api_key=key)
+    out = _out_path("elevenlabs", "mp3")
+    try:
+        audio = client.text_to_speech.convert(
+            text=text, voice_id=voice_id,
+            model_id="eleven_flash_v2_5", output_format="mp3_44100_128",
+        )
+        with open(out, "wb") as f:
+            for chunk in audio:
+                if chunk:
+                    f.write(chunk)
+    except Exception as e:
+        raise gr.Error(f"ElevenLabs TTS failed: {e}")
     return out
 
 
@@ -260,6 +357,22 @@ with gr.Blocks(title="TTS Bake-off") as demo:
             o_btn = gr.Button("Generate (OpenAI)", variant="primary")
             o_out = gr.Audio(label="OpenAI output", type="filepath", autoplay=True)
             o_btn.click(gen_openai, [text, o_voice, o_instr], o_out)
+
+        with gr.Tab("Cartesia (fast, cloud)"):
+            gr.Markdown("Sonic: lowest-latency streaming TTS (~90ms), very natural, cheaper per character than ElevenLabs. Needs `CARTESIA_API_KEY`. Text leaves your machine.")
+            ca_voice = gr.Dropdown(CARTESIA_VOICES, value="3e39e9a5-585c-4f5f-bac6-5e4905c51095", label="Voice")
+            ca_custom = gr.Textbox(label="Custom voice ID (optional, overrides the dropdown)", placeholder="paste any Cartesia voice ID")
+            ca_btn = gr.Button("Generate (Cartesia)", variant="primary")
+            ca_out = gr.Audio(label="Cartesia output", type="filepath", autoplay=True)
+            ca_btn.click(gen_cartesia, [text, ca_voice, ca_custom], ca_out)
+
+        with gr.Tab("ElevenLabs (fast, cloud)"):
+            gr.Markdown("Flash v2.5: the most human-sounding, ~75ms streaming, huge voice library plus cloning. Priciest per character. Needs `ELEVENLABS_API_KEY`. Text leaves your machine.")
+            el_voice = gr.Dropdown(ELEVENLABS_VOICES, value="nPczCjzI2devNBz1zQrb", label="Voice")
+            el_custom = gr.Textbox(label="Custom voice ID (optional, overrides the dropdown)", placeholder="paste any ElevenLabs voice ID")
+            el_btn = gr.Button("Generate (ElevenLabs)", variant="primary")
+            el_out = gr.Audio(label="ElevenLabs output", type="filepath", autoplay=True)
+            el_btn.click(gen_elevenlabs, [text, el_voice, el_custom], el_out)
 
         with gr.Tab("Chatterbox (local, slow)"):
             gr.Markdown("Expressive. Higher exaggeration = more emotion; lower CFG = looser pacing. Drop a clip to clone a voice.")
