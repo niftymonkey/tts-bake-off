@@ -1,0 +1,17 @@
+services:
+  tts-bakeoff:
+    build: .
+    image: tts-bakeoff:cpu
+    container_name: tts-bakeoff
+    ports:
+      - "7860:7860"
+    # Cloud tabs read these keys. Set them in a .env file next to this compose file
+    # (see .env.example); a tab without a key still loads and only errors on Generate.
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      CARTESIA_API_KEY: ${CARTESIA_API_KEY:-}
+      ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
+    # Persist generated audio to the host; drop this line for ephemeral output.
+    volumes:
+      - ./out:/app/out
+    restart: unless-stopped

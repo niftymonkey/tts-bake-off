@@ -68,6 +68,24 @@ venv-ui/bin/python app.py     # serves http://localhost:7860
 Open `http://localhost:7860` using the literal `localhost` so the browser treats it as a
 secure context. Otherwise the in-browser mic for voice cloning is disabled.
 
+## Run in Docker (CPU: Kokoro + cloud tabs)
+
+For an always-on instance that survives reboots without `uv`, venvs, or this directory,
+there is a CPU-only image with the Kokoro (local) and OpenAI / Cartesia / ElevenLabs
+(cloud) tabs. The GPU engines are excluded on purpose: they need CUDA venvs and multi-GB
+weights and are the quality-comparison path, not the always-on one. For those, run
+natively.
+
+```sh
+cp .env.example .env      # fill in whichever cloud keys you use; Kokoro needs none
+docker compose up -d      # builds once, then serves http://localhost:7860
+```
+
+The Kokoro weights are baked into the image, so the container is self-contained on boot.
+`restart: unless-stopped` brings it back on reboot and lists it in Docker Desktop.
+Generated audio persists to `./out`; the cloud keys are read from `.env` (gitignored).
+The build reuses the same lockfiles as `setup.sh`, so it tracks the native venvs.
+
 ## Layout
 
 - `app.py`: Gradio front-end. Talks to per-engine workers; calls OpenAI in-process.

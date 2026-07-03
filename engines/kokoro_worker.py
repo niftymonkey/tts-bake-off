@@ -23,7 +23,7 @@ def emit(obj):
 from kokoro_onnx import Kokoro
 import soundfile as sf
 
-MODELS = "/home/mlo/dev/niftymonkey/tts-bake-off/models"
+MODELS = os.environ.get("MODELS_DIR") or "/home/mlo/dev/niftymonkey/tts-bake-off/models"
 kokoro = Kokoro(f"{MODELS}/kokoro-v1.0.onnx", f"{MODELS}/voices-v1.0.bin")
 emit({"ready": True})
 

@@ -1,0 +1,18 @@
+# The image builds its own CPU venvs and downloads Kokoro weights; never ship the
+# host's GPU venvs or caches into the build context.
+venv-*/
+models/
+out/
+logs/
+__pycache__/
+*.pyc
+.git/
+.claude/
+*.wav
+
+# Secrets: pass keys as env vars via compose, not baked into the image.
+.openai_key
+.cartesia_key
+.elevenlabs_key
+.api-keys
+.env

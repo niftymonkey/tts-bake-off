@@ -14,13 +14,17 @@ Launch:  venv-ui/bin/python app.py   then open the printed URL.
 """
 import os
 import json
+import struct
 import subprocess
 import threading
 import itertools
 
 import gradio as gr
 
-BAKE = "/home/mlo/dev/niftymonkey/tts-bake-off"
+BAKE = os.environ.get("BAKE_DIR") or "/home/mlo/dev/niftymonkey/tts-bake-off"
+# GPU engines (Chatterbox, XTTS, Dia) need their own CUDA venvs; the containerized
+# CPU build ships without them and sets GPU_ENGINES=0 to hide those tabs.
+GPU_ENGINES = os.environ.get("GPU_ENGINES", "1") != "0"
 OUT = f"{BAKE}/out"
 LOGS = f"{BAKE}/logs"
 os.makedirs(OUT, exist_ok=True)
@@ -123,6 +127,35 @@ def _out_path(engine, ext="wav"):
     return f"{OUT}/ui-{engine}-{next(_counter)}.{ext}"
 
 
+def _fix_wav_header(path):
+    """Patch a streamed WAV's length fields to the real file size.
+
+    OpenAI and Cartesia stream WAV and emit the header before the total length is
+    known, stamping the RIFF and data chunk sizes with the 0xFFFFFFFF placeholder.
+    Players that trust the header compute a bogus duration and stop end-of-stream
+    detection early, clipping the final words. Rewriting both size fields to match the
+    bytes on disk makes the header honest so playback runs to the true end.
+    """
+    size = os.path.getsize(path)
+    with open(path, "r+b") as f:
+        if f.read(4) != b"RIFF" or f.seek(8) and f.read(4) != b"WAVE":
+            return  # not a WAV we recognize; leave it untouched
+        f.seek(4)
+        f.write(struct.pack("<I", size - 8))
+        f.seek(12)
+        while True:
+            hdr = f.read(8)
+            if len(hdr) < 8:
+                return
+            cid, csz = struct.unpack("<4sI", hdr)
+            if cid == b"data":
+                data_start = f.tell()
+                f.seek(data_start - 4)
+                f.write(struct.pack("<I", size - data_start))
+                return
+            f.seek(csz + (csz & 1), 1)  # skip chunk (+pad byte if odd length)
+
+
 def _run(engine, req):
     if not req["text"].strip():
         raise gr.Error("Enter some text first.")
@@ -159,8 +192,9 @@ def gen_dia(text):
 
 # --- OpenAI (cloud, in-process) ---
 
-OPENAI_VOICES = ["alloy", "ash", "ballad", "coral", "echo", "fable",
-                 "nova", "onyx", "sage", "shimmer", "verse"]
+# marin and cedar are OpenAI's newest, most natural voices (recommended for best quality).
+OPENAI_VOICES = ["marin", "cedar", "alloy", "ash", "ballad", "coral", "echo",
+                 "fable", "nova", "onyx", "sage", "shimmer", "verse"]
 
 # (label, voice_id) pairs, curated to the conversational / warm / articulate realm.
 # Paste any other voice ID into the tab's custom-ID box.
@@ -227,7 +261,7 @@ def gen_openai(text, voice, instructions):
     from openai import OpenAI
     client = OpenAI(api_key=key)
     out = _out_path("openai")
-    params = dict(model="gpt-4o-mini-tts", voice=voice, input=text, response_format="wav")
+    params = dict(model="gpt-4o-mini-tts-2025-12-15", voice=voice, input=text, response_format="wav")
     instr = (instructions or "").strip()
     if instr:
         params["instructions"] = instr  # omit entirely when empty; the API rejects null
@@ -236,6 +270,7 @@ def gen_openai(text, voice, instructions):
             resp.stream_to_file(out)
     except Exception as e:
         raise gr.Error(f"OpenAI TTS failed: {e}")
+    _fix_wav_header(out)
     return out
 
 
@@ -262,6 +297,7 @@ def gen_cartesia(text, voice, custom_voice):
         resp.write_to_file(out)
     except Exception as e:
         raise gr.Error(f"Cartesia TTS failed: {e}")
+    _fix_wav_header(out)
     return out
 
 
@@ -332,13 +368,19 @@ except OSError:
     SAMPLE = "Right then, let's hear how this one sounds."
 
 with gr.Blocks(title="TTS Bake-off") as demo:
-    gr.Markdown(
+    intro = (
         "# TTS Bake-off\n"
         "Type once, render across engines, compare by ear. Audio plays in your browser.\n\n"
-        "_GPU engines (Chatterbox / XTTS / Dia) load on first use and only one stays "
-        "resident at a time, so switching between them costs a reload. Kokoro (CPU) and "
-        "OpenAI (cloud) are always instant to reach._"
     )
+    if GPU_ENGINES:
+        intro += (
+            "_GPU engines (Chatterbox / XTTS / Dia) load on first use and only one stays "
+            "resident at a time, so switching between them costs a reload. Kokoro (CPU) and "
+            "OpenAI (cloud) are always instant to reach._"
+        )
+    else:
+        intro += "_Kokoro runs locally on CPU; OpenAI, Cartesia, and ElevenLabs are cloud._"
+    gr.Markdown(intro)
     text = gr.Textbox(label="Text to speak", value=SAMPLE, lines=3)
 
     with gr.Tabs():
@@ -352,7 +394,7 @@ with gr.Blocks(title="TTS Bake-off") as demo:
 
         with gr.Tab("OpenAI (fast, cloud)"):
             gr.Markdown("Streaming cloud TTS, low latency and natural. Needs an OpenAI key in `~/tts-bakeoff/.openai_key`. Text leaves your machine.")
-            o_voice = gr.Dropdown(OPENAI_VOICES, value="onyx", label="Voice")
+            o_voice = gr.Dropdown(OPENAI_VOICES, value="marin", label="Voice (marin/cedar are OpenAI's newest, recommended)")
             o_instr = gr.Textbox(label="Tone instructions (optional)", placeholder="e.g. Calm, warm, conversational. Speak a touch faster.", lines=2)
             o_btn = gr.Button("Generate (OpenAI)", variant="primary")
             o_out = gr.Audio(label="OpenAI output", type="filepath", autoplay=True)
@@ -374,29 +416,30 @@ with gr.Blocks(title="TTS Bake-off") as demo:
             el_out = gr.Audio(label="ElevenLabs output", type="filepath", autoplay=True)
             el_btn.click(gen_elevenlabs, [text, el_voice, el_custom], el_out)
 
-        with gr.Tab("Chatterbox (local, slow)"):
-            gr.Markdown("Expressive. Higher exaggeration = more emotion; lower CFG = looser pacing. Drop a clip to clone a voice.")
-            c_exag = gr.Slider(0.25, 2.0, value=0.5, step=0.05, label="Exaggeration")
-            c_cfg = gr.Slider(0.2, 1.0, value=0.5, step=0.05, label="CFG weight")
-            c_ref = gr.Audio(label="Optional: reference clip to clone (5-15s)", sources=["upload", "microphone"], type="filepath")
-            c_btn = gr.Button("Generate (Chatterbox)", variant="primary")
-            c_out = gr.Audio(label="Chatterbox output", type="filepath", autoplay=True)
-            c_btn.click(gen_chatterbox, [text, c_exag, c_cfg, c_ref], c_out)
+        if GPU_ENGINES:
+            with gr.Tab("Chatterbox (local, slow)"):
+                gr.Markdown("Expressive. Higher exaggeration = more emotion; lower CFG = looser pacing. Drop a clip to clone a voice.")
+                c_exag = gr.Slider(0.25, 2.0, value=0.5, step=0.05, label="Exaggeration")
+                c_cfg = gr.Slider(0.2, 1.0, value=0.5, step=0.05, label="CFG weight")
+                c_ref = gr.Audio(label="Optional: reference clip to clone (5-15s)", sources=["upload", "microphone"], type="filepath")
+                c_btn = gr.Button("Generate (Chatterbox)", variant="primary")
+                c_out = gr.Audio(label="Chatterbox output", type="filepath", autoplay=True)
+                c_btn.click(gen_chatterbox, [text, c_exag, c_cfg, c_ref], c_out)
 
-        with gr.Tab("XTTS-v2 (local, slow)"):
-            gr.Markdown("58 built-in voices, or drop a clip to clone (cloning overrides the chosen speaker).")
-            x_spk = gr.Dropdown(XTTS_SPEAKERS, value="Andrew Chipper", label="Built-in speaker")
-            x_lang = gr.Dropdown(XTTS_LANGS, value="en", label="Language")
-            x_ref = gr.Audio(label="Optional: reference clip to clone (6s+)", sources=["upload", "microphone"], type="filepath")
-            x_btn = gr.Button("Generate (XTTS-v2)", variant="primary")
-            x_out = gr.Audio(label="XTTS-v2 output", type="filepath", autoplay=True)
-            x_btn.click(gen_xtts, [text, x_spk, x_lang, x_ref], x_out)
+            with gr.Tab("XTTS-v2 (local, slow)"):
+                gr.Markdown("58 built-in voices, or drop a clip to clone (cloning overrides the chosen speaker).")
+                x_spk = gr.Dropdown(XTTS_SPEAKERS, value="Andrew Chipper", label="Built-in speaker")
+                x_lang = gr.Dropdown(XTTS_LANGS, value="en", label="Language")
+                x_ref = gr.Audio(label="Optional: reference clip to clone (6s+)", sources=["upload", "microphone"], type="filepath")
+                x_btn = gr.Button("Generate (XTTS-v2)", variant="primary")
+                x_out = gr.Audio(label="XTTS-v2 output", type="filepath", autoplay=True)
+                x_btn.click(gen_xtts, [text, x_spk, x_lang, x_ref], x_out)
 
-        with gr.Tab("Dia (local, slowest)"):
-            gr.Markdown("Ultra-expressive dialogue model. Single-speaker text is auto-tagged. Heaviest render; not for real-time.")
-            d_btn = gr.Button("Generate (Dia)", variant="primary")
-            d_out = gr.Audio(label="Dia output", type="filepath", autoplay=True)
-            d_btn.click(gen_dia, [text], d_out)
+            with gr.Tab("Dia (local, slowest)"):
+                gr.Markdown("Ultra-expressive dialogue model. Single-speaker text is auto-tagged. Heaviest render; not for real-time.")
+                d_btn = gr.Button("Generate (Dia)", variant="primary")
+                d_out = gr.Audio(label="Dia output", type="filepath", autoplay=True)
+                d_btn.click(gen_dia, [text], d_out)
 
 if __name__ == "__main__":
     demo.queue().launch(server_name="0.0.0.0", server_port=7860, show_error=True, allowed_paths=[OUT])
