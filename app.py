@@ -212,6 +212,21 @@ CARTESIA_VOICES = [
     ("Ronald - Thinker", "5ee9feff-1265-424a-9d7f-8e4d431a12c7"),
 ]
 
+# Deepgram Aura-2 "voices" are model names (aura-2-<name>-en). Curated to the warm /
+# conversational / natural realm; paste any other Aura model into the tab's custom box.
+DEEPGRAM_VOICES = [
+    ("Thalia - Clear, Confident (flagship)", "aura-2-thalia-en"),
+    ("Andromeda - Casual, Expressive", "aura-2-andromeda-en"),
+    ("Helena - Caring, Natural, Friendly", "aura-2-helena-en"),
+    ("Cora - Smooth, Melodic, Caring", "aura-2-cora-en"),
+    ("Vesta - Natural, Expressive, Empathetic", "aura-2-vesta-en"),
+    ("Arcas - Natural, Smooth, Clear", "aura-2-arcas-en"),
+    ("Apollo - Confident, Comfortable, Casual", "aura-2-apollo-en"),
+    ("Aries - Warm, Energetic, Caring", "aura-2-aries-en"),
+    ("Draco - Warm, Trustworthy, British", "aura-2-draco-en"),
+    ("Orion - Approachable, Calm, Polite", "aura-2-orion-en"),
+]
+
 # ElevenLabs free plans cannot use library voices via the API (402 paid_plan_required),
 # so these are all premade account voices, picked for warm/conversational/articulate tone.
 ELEVENLABS_VOICES = [
@@ -250,6 +265,10 @@ def _cartesia_key():
 
 def _elevenlabs_key():
     return _provider_key(("ELEVENLABS_API_KEY",), ".elevenlabs_key")
+
+
+def _deepgram_key():
+    return _provider_key(("DEEPGRAM_API_KEY",), ".deepgram_key")
 
 
 def gen_openai(text, voice, instructions):
@@ -328,6 +347,38 @@ def gen_elevenlabs(text, voice, custom_voice):
     return out
 
 
+# --- Deepgram (cloud, in-process) ---
+
+
+def gen_deepgram(text, voice, custom_voice):
+    if not text.strip():
+        raise gr.Error("Enter some text first.")
+    key = _deepgram_key()
+    if not key:
+        raise gr.Error("No Deepgram key found. Set DEEPGRAM_API_KEY (or put it in .deepgram_key) and restart.")
+    model = (custom_voice or "").strip() or voice
+    if " " in model or len(model) > 60:
+        raise gr.Error("The 'Custom model' box looks like speech, not a voice. Put your words in "
+                       "the 'Text to speak' box at the top and leave 'Custom model' empty (or enter "
+                       "a model id like aura-2-zeus-en).")
+    from deepgram import DeepgramClient
+    client = DeepgramClient(api_key=key)
+    out = _out_path("deepgram", "wav")
+    try:
+        audio = client.speak.v1.audio.generate(
+            text=text, model=model,
+            encoding="linear16", container="wav", sample_rate=24000,
+        )
+        with open(out, "wb") as f:
+            for chunk in audio:
+                if chunk:
+                    f.write(chunk)
+    except Exception as e:
+        raise gr.Error(f"Deepgram TTS failed: {e}")
+    _fix_wav_header(out)
+    return out
+
+
 KOKORO_VOICES = [
     "af_alloy", "af_aoede", "af_bella", "af_heart", "af_jessica", "af_kore",
     "af_nicole", "af_nova", "af_river", "af_sarah", "af_sky", "am_adam",
@@ -379,7 +430,7 @@ with gr.Blocks(title="TTS Bake-off") as demo:
             "OpenAI (cloud) are always instant to reach._"
         )
     else:
-        intro += "_Kokoro runs locally on CPU; OpenAI, Cartesia, and ElevenLabs are cloud._"
+        intro += "_Kokoro runs locally on CPU; OpenAI, Cartesia, ElevenLabs, and Deepgram are cloud._"
     gr.Markdown(intro)
     text = gr.Textbox(label="Text to speak", value=SAMPLE, lines=3)
 
@@ -415,6 +466,14 @@ with gr.Blocks(title="TTS Bake-off") as demo:
             el_btn = gr.Button("Generate (ElevenLabs)", variant="primary")
             el_out = gr.Audio(label="ElevenLabs output", type="filepath", autoplay=True)
             el_btn.click(gen_elevenlabs, [text, el_voice, el_custom], el_out)
+
+        with gr.Tab("Deepgram (fast, cloud)"):
+            gr.Markdown("Aura-2: low-latency streaming TTS, natural and expressive, cheap per character. Voices are model names (`aura-2-<name>-en`). Needs `DEEPGRAM_API_KEY`. Text leaves your machine.")
+            dg_voice = gr.Dropdown(DEEPGRAM_VOICES, value="aura-2-thalia-en", label="Voice")
+            dg_custom = gr.Textbox(label="Custom model (optional, overrides the dropdown)", placeholder="e.g. aura-2-zeus-en")
+            dg_btn = gr.Button("Generate (Deepgram)", variant="primary")
+            dg_out = gr.Audio(label="Deepgram output", type="filepath", autoplay=True)
+            dg_btn.click(gen_deepgram, [text, dg_voice, dg_custom], dg_out)
 
         if GPU_ENGINES:
             with gr.Tab("Chatterbox (local, slow)"):

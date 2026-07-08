@@ -1,4 +1,4 @@
-# CPU-only TTS Bake-off: Kokoro (local) + OpenAI / Cartesia / ElevenLabs (cloud).
+# CPU-only TTS Bake-off: Kokoro (local) + OpenAI / Cartesia / ElevenLabs / Deepgram (cloud).
 # The GPU engines (Chatterbox, XTTS, Dia) are intentionally excluded; they need CUDA
 # venvs and multi-GB weights and are not the always-on, real-time use case.
 FROM python:3.12-slim

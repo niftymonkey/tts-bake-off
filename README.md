@@ -11,11 +11,12 @@ render it across five engines, and listen in the browser to pick a voice.
 | OpenAI gpt-4o-mini-tts | cloud | fast | Streaming, steerable tone. Real-time capable. Sends text to OpenAI. |
 | Cartesia Sonic | cloud | fast | Lowest-latency streaming (~90ms), very natural. Sends text to Cartesia. |
 | ElevenLabs Flash v2.5 | cloud | fast | Most human-sounding, ~75ms streaming, huge voice library. Sends text to ElevenLabs. |
+| Deepgram Aura-2 | cloud | fast | Low-latency streaming, natural and cheap per character. Sends text to Deepgram. |
 | Chatterbox | local GPU | slow | Exaggeration / CFG sliders, voice cloning. |
 | XTTS-v2 | local GPU | slow | 58 built-in speakers, voice cloning. |
 | Dia | local GPU | slowest | Ultra-expressive dialogue model. |
 
-The cloud engines (**OpenAI**, **Cartesia**, **ElevenLabs**) and **Kokoro** (local CPU)
+The cloud engines (**OpenAI**, **Cartesia**, **ElevenLabs**, **Deepgram**) and **Kokoro** (local CPU)
 are all fast enough for real-time read-aloud. The GPU engines are for quality comparison,
 not production use. Only one GPU model stays resident at a time (11GB budget), so
 switching between Chatterbox, XTTS, and Dia forces a reload; the cloud engines and Kokoro
@@ -55,6 +56,7 @@ project root as a fallback:
 | OpenAI | `OPENAI_API_KEY` (or `OPEN_AI_TTS_KEY`) | `.openai_key` |
 | Cartesia | `CARTESIA_API_KEY` | `.cartesia_key` |
 | ElevenLabs | `ELEVENLABS_API_KEY` | `.elevenlabs_key` |
+| Deepgram | `DEEPGRAM_API_KEY` | `.deepgram_key` |
 
 A tab without a key still loads; it just errors when you click Generate. Restart the app
 after adding a key.
@@ -71,8 +73,8 @@ secure context. Otherwise the in-browser mic for voice cloning is disabled.
 ## Run in Docker (CPU: Kokoro + cloud tabs)
 
 For an always-on instance that survives reboots without `uv`, venvs, or this directory,
-there is a CPU-only image with the Kokoro (local) and OpenAI / Cartesia / ElevenLabs
-(cloud) tabs. The GPU engines are excluded on purpose: they need CUDA venvs and multi-GB
+there is a CPU-only image with the Kokoro (local) and OpenAI / Cartesia / ElevenLabs /
+Deepgram (cloud) tabs. The GPU engines are excluded on purpose: they need CUDA venvs and multi-GB
 weights and are the quality-comparison path, not the always-on one. For those, run
 natively.
 
