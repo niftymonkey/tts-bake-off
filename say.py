@@ -45,6 +45,10 @@ STATE = os.environ.get("VOICE_DIR") or os.path.expanduser("~/.claude/voice")
 SOCK = f"{STATE}/kokoro.sock"
 LOCK = f"{STATE}/kokoro.lock"
 SPEAK_PID = f"{STATE}/speaking.pgid"
+STOPPED = f"{STATE}/stopped"
+# When this run began, used to tell a barge-in aimed at us from one aimed at the
+# utterance before us. See `claim_speaker`.
+STARTED = time.time()
 DAEMON_LOG = f"{STATE}/kokoro-daemon.log"
 DEFAULT_OUT = f"{STATE}/say.wav"
 
@@ -420,13 +424,36 @@ def stop_speaking():
     return killed
 
 
+def _stopped_since_start():
+    """True if someone asked for silence after this run began.
+
+    A turn's speech is launched detached, so there is a moment between launch and
+    claiming the speaker where this run owns nothing and a barge-in has nothing
+    to kill. Without this check that barge-in is ignored and the run starts
+    talking immediately afterwards, which is the interruption failing outright.
+    """
+    try:
+        return os.path.getmtime(STOPPED) > STARTED
+    except OSError:
+        return False
+
+
 def claim_speaker():
-    """Become the one run allowed to make noise, ending any run already going."""
-    os.setpgrp()  # paplay inherits this group, so one signal reaches both
+    """Become the one run allowed to make noise, ending any run already going.
+
+    Raises SystemExit if a barge-in landed while this run was starting up.
+    """
+    os.setpgrp()  # the player inherits this group, so one signal reaches both
     stop_speaking()
     os.makedirs(STATE, exist_ok=True)
     with open(SPEAK_PID, "w") as f:
         f.write(str(os.getpgrp()))
+    # Claim first, then look. A stop landing between the two orderings would
+    # otherwise find no claim to kill and pass unnoticed, leaving this run to
+    # speak straight through an interruption that had already been made.
+    if _stopped_since_start():
+        release_speaker()
+        raise SystemExit(0)
 
 
 def release_speaker():
@@ -613,6 +640,11 @@ def main():
         return 0
 
     if args.stop or args.shutdown:
+        os.makedirs(STATE, exist_ok=True)
+        # Recorded even when there was nothing to kill, so a run still starting
+        # up can see that silence was asked for and give up before it speaks.
+        with open(STOPPED, "w"):
+            pass
         stop_speaking()
         if args.shutdown:
             shutdown_daemon()
