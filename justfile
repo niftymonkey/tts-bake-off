@@ -18,6 +18,10 @@ dev:
 setup *args:
     ./setup.sh {{args}}
 
+# PROTOTYPE: hear the candidate voice-mode spoken registers back to back
+register:
+    python3 prototype/voice_register.py
+
 # Kill stuck read-aloud/audio processes and report PulseAudio health
 clean:
     bash cleanup_audio.sh
