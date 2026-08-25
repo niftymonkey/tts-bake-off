@@ -70,11 +70,14 @@ def audition(args):
 
 def bake(args):
     text = args.text
-    if text is None:
+    if not text:
         side = f"{args.wav}.txt"
         if os.path.exists(side):
-            text = open(side).read().strip()
-    if text is None:
+            with open(side) as f:
+                text = f.read().strip()
+    # Truthiness, not `is None`: an empty or whitespace-only sidecar would
+    # otherwise reach the cloner as a blank transcript.
+    if not text:
         raise SystemExit(f"No transcript. Pass --text, or put it in {args.wav}.txt")
 
     model = load_model()
