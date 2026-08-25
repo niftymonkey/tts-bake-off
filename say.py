@@ -76,7 +76,15 @@ def _daemon_log(engine):
 # that back once a session goes quiet.
 # A later turn simply pays the load again and restarts it.
 IDLE_EXIT_SECONDS = float(os.environ.get("VOICE_IDLE_EXIT", 1800))
+# How long a worker may take to answer with its ready line. Kokoro keeps the tight
+# bound; OmniVoice imports ~3.2GB of weights, and on a machine that has never run
+# it that import downloads them first, which no 30s budget survives.
 MODEL_LOAD_TIMEOUT = 30.0
+LOAD_TIMEOUTS = {"omnivoice": 900.0}
+
+
+def _load_timeout(engine):
+    return LOAD_TIMEOUTS.get(engine, MODEL_LOAD_TIMEOUT)
 # Generous: this bounds one chunk's synthesis, and only fires on a wedged worker.
 WORKER_REPLY_TIMEOUT = 120.0
 
@@ -196,7 +204,7 @@ def _serve(engine):
     )
     # Bounded like every other read from the worker: a hang here would hold both
     # the lock and the socket, so no session could ever start a working daemon.
-    if not select.select([worker.stdout], [], [], MODEL_LOAD_TIMEOUT)[0] \
+    if not select.select([worker.stdout], [], [], _load_timeout(engine))[0] \
             or not worker.stdout.readline():
         worker.terminate()
         os.unlink(sock)
@@ -260,7 +268,7 @@ def _start_daemon(engine):
     subprocess.Popen([sys.executable, os.path.abspath(__file__), "--serve", engine],
                      stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                      start_new_session=True)
-    deadline = time.time() + MODEL_LOAD_TIMEOUT
+    deadline = time.time() + _load_timeout(engine)
     while time.time() < deadline:
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as c:
@@ -268,7 +276,7 @@ def _start_daemon(engine):
             return
         except OSError:
             time.sleep(0.1)
-    raise RuntimeError(f"{engine} daemon did not come up in {MODEL_LOAD_TIMEOUT}s; "
+    raise RuntimeError(f"{engine} daemon did not come up in {_load_timeout(engine)}s; "
                        f"see {_daemon_log(engine)}")
 
 

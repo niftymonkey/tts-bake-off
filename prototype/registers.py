@@ -26,6 +26,9 @@ WORDS_PER_SECOND = 3.17
 
 _FENCE = re.compile(r"```.*?```", re.S)
 _INLINE_CODE = re.compile(r"`[^`]+`")
+# Before _URL, which would take the closing paren with the address and strand
+# the label: "[docs](http://x)" became "docs(" rather than "docs".
+_MD_LINK = re.compile(r"\[([^\]]+)\]\(https?://[^)\s]+\)")
 _URL = re.compile(r"https?://\S+")
 _PATH_LINE = re.compile(r"\b[\w./-]+\.(py|ts|tsx|js|json|sh|md|yaml|yml):\d+\b")
 _MD_PUNCT = re.compile(r"[*_#>|\[\]]+")
@@ -40,6 +43,7 @@ def sanitize(text):
     """
     text = _FENCE.sub(" ", text)
     text = _INLINE_CODE.sub(" ", text)
+    text = _MD_LINK.sub(r"\1", text)
     text = _URL.sub(" ", text)
     text = _PATH_LINE.sub(" ", text)
     text = _MD_PUNCT.sub("", text)

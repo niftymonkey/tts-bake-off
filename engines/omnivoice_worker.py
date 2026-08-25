@@ -46,10 +46,17 @@ _prompts = {}
 
 
 def _prompt(path):
-    if path not in _prompts:
+    """Load a baked speaker, keyed on path AND mtime.
+
+    Baking a new voice rewrites the same path, so a path-only cache would keep
+    serving the old speaker until the daemon idled out, with nothing to say why.
+    """
+    key = (path, os.path.getmtime(path))
+    if key not in _prompts:
         from omnivoice.models.omnivoice import VoiceClonePrompt
-        _prompts[path] = VoiceClonePrompt.load(path)
-    return _prompts[path]
+        _prompts.clear()  # only the current voice is ever wanted again
+        _prompts[key] = VoiceClonePrompt.load(path)
+    return _prompts[key]
 
 
 emit({"ready": True})

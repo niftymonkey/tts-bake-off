@@ -36,14 +36,15 @@ NUM_STEP = int(os.environ.get("OMNIVOICE_STEPS", 32))
 STATE = os.environ.get("VOICE_DIR") or os.path.expanduser("~/.claude/voice")
 DEFAULT_PROMPT = os.environ.get("OMNIVOICE_VOICE_PROMPT") or f"{STATE}/omnivoice-voice.pt"
 
-# The audition line is long enough to give the cloner ~12s of varied prosody and
-# short enough to stay under the 20s the library trims at. It mixes a statement,
-# a question and a list so the baked voice is not shaped by one flat sentence.
+# OmniVoice asks for 3 to 10 seconds of reference audio, and its automatic
+# trimming is SKIPPED when a ref_text is supplied, which this path always does:
+# the audio has to stay aligned with the transcript. So the length is ours to get
+# right rather than the library's. A statement and a question keep the baked
+# voice from being shaped by one flat sentence.
 REF_TEXT = (
-    "Right, let me walk you through what actually changed here. "
-    "The build is green, the tests pass, and nothing else moved. "
-    "Do you want me to push it now, or wait until the review lands? "
-    "There are three things left: the config, the docs, and one flaky test."
+    "Right, let me walk you through what changed. "
+    "The build is green and the tests pass. "
+    "Do you want me to push it now, or wait for the review?"
 )
 
 

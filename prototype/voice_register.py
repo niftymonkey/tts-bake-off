@@ -173,7 +173,17 @@ def speak(kokoro, state, text, label=None):
     pad_silence(OUT)
     state.status = f"speaking{'' if not label else ' ' + label}..."
     render(state)
-    subprocess.run(["paplay", OUT], timeout=120)
+    try:
+        played = subprocess.run(["paplay", OUT], timeout=120)
+    except FileNotFoundError:
+        state.status = "no paplay on PATH"
+        return
+    except subprocess.TimeoutExpired:
+        state.status = "paplay timed out"
+        return
+    if played.returncode != 0:
+        state.status = f"paplay failed rc={played.returncode}"
+        return
     state.status = "ready"
 
 
