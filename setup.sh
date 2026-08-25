@@ -25,7 +25,7 @@ PY=3.12  # every venv was built on CPython 3.12
 # Every engine that has a lockfile. orpheus has a venv but no worker yet and pulls vLLM
 # (heavy), so it is left out of the default set and reachable via --with-orpheus / --only.
 KNOWN=(kokoro chatterbox xtts dia ui orpheus)
-DEFAULT_ENGINES=(kokoro chatterbox xtts dia ui)
+DEFAULT_ENGINES=(omnivoice kokoro chatterbox xtts dia ui)
 
 # Kokoro is the only engine whose weights live in the repo (models/). Sizes are checked
 # so a truncated download is re-fetched rather than silently used.
@@ -86,12 +86,13 @@ if ! command -v ffmpeg >/dev/null 2>&1; then
   echo "warning: ffmpeg not on PATH. XTTS needs linuxbrew ffmpeg at runtime (see README)." >&2
 fi
 
-# dia's torch is the CUDA 12.6 build from the PyTorch index; every other engine
-# resolves entirely from PyPI.
+# dia and omnivoice take their torch from the PyTorch index, each pinned to the
+# CUDA build it was tested against; every other engine resolves entirely from PyPI.
 extra_index_for() {
   case "$1" in
-    dia) echo "https://download.pytorch.org/whl/cu126" ;;
-    *)   echo "" ;;
+    dia)       echo "https://download.pytorch.org/whl/cu126" ;;
+    omnivoice) echo "https://download.pytorch.org/whl/cu128" ;;
+    *)         echo "" ;;
   esac
 }
 

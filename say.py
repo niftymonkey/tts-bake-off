@@ -5,11 +5,12 @@ The command-line half of Claude Code voice mode: hooks pipe a turn's text in
 here, this renders it to a WAV and plays it. Under WSL that playback goes to
 Windows rather than PulseAudio; see `use_windows_player`.
 
-Kokoro is the default and runs locally, but loading its ONNX model costs ~3.4s,
-which is too much to pay per turn. So the first call starts a small warm daemon
-(`--serve`) that owns the loaded model and answers over a unix socket; later
-calls reuse it and cost ~1-2s. The daemon exits on its own after an idle spell,
-and `--shutdown` ends it immediately.
+Two engines run locally: OmniVoice on the GPU (the default) and Kokoro on the
+CPU. Both cost seconds to load, which is too much to pay per turn, so the first
+call starts a small warm daemon (`--serve`) that owns the loaded model and
+answers over a unix socket; later calls reuse it. Each engine gets its own
+daemon, so both can be warm at once. A daemon exits on its own after an idle
+spell, and `--shutdown` ends them all immediately.
 
 The cloud engines are one-shot HTTPS calls with no warm-up to manage. They need
 this script to run under `venv-ui/bin/python`, which has their SDKs installed.
@@ -18,7 +19,8 @@ WAV, and its free plan already blocks the library voices worth using.
 
 Playback starts before the whole utterance has been rendered; see `speak`.
 
-    say.py "text to speak"                   # kokoro, am_michael, speed 1.2
+    say.py "text to speak"                   # omnivoice, male american voice
+    say.py --engine kokoro "text"            # the CPU engine instead
     say.py --engine cartesia "text"          # a cloud engine instead
     say.py --no-play --out /tmp/a.wav "text" # render the lot to one file instead
     say.py --stop                            # cut off whatever is playing
@@ -26,6 +28,7 @@ Playback starts before the whole utterance has been rendered; see `speak`.
 """
 import argparse
 import fcntl
+import functools
 import json
 import os
 import re
@@ -42,22 +45,35 @@ import wave
 
 BAKE = os.environ.get("BAKE_DIR") or os.path.dirname(os.path.abspath(__file__))
 STATE = os.environ.get("VOICE_DIR") or os.path.expanduser("~/.claude/voice")
-SOCK = f"{STATE}/kokoro.sock"
-LOCK = f"{STATE}/kokoro.lock"
 SPEAK_PID = f"{STATE}/speaking.pgid"
 STOPPED = f"{STATE}/stopped"
 # When this run began, used to tell a barge-in aimed at us from one aimed at the
 # utterance before us. See `claim_speaker`.
 STARTED = time.time()
-DAEMON_LOG = f"{STATE}/kokoro-daemon.log"
 DEFAULT_OUT = f"{STATE}/say.wav"
 
-# Chosen by ear 2026-07-31 from seven Kokoro voices; every speech-rate figure in
-# this project's notes was measured at this pairing.
-DEFAULT_VOICE = "am_michael"
-DEFAULT_SPEED = 1.2
+DEFAULT_ENGINE = "omnivoice"
+# Kokoro's, chosen by ear 2026-07-31 from seven voices; every Kokoro speech-rate
+# figure in this project's notes was measured at this pairing.
+KOKORO_VOICE = "am_michael"
+KOKORO_SPEED = 1.2
 
-# The warm model holds ~400MB, so it gives that back once a session goes quiet.
+# A local engine's daemon is keyed by engine name, so the two can be warm at once
+# and shutting one down leaves the other alone.
+def _sock(engine):
+    return f"{STATE}/{engine}.sock"
+
+
+def _lock(engine):
+    return f"{STATE}/{engine}.lock"
+
+
+def _daemon_log(engine):
+    return f"{STATE}/{engine}-daemon.log"
+
+
+# The warm model holds ~400MB (Kokoro) or ~2GB of VRAM (OmniVoice), so it gives
+# that back once a session goes quiet.
 # A later turn simply pays the load again and restarts it.
 IDLE_EXIT_SECONDS = float(os.environ.get("VOICE_IDLE_EXIT", 1800))
 MODEL_LOAD_TIMEOUT = 30.0
@@ -108,35 +124,55 @@ def pad_silence(path, seconds=0.7):
         w.writeframes(quiet + frames)
 
 
-# --- warm Kokoro daemon --------------------------------------------------
+# --- warm local-engine daemons -------------------------------------------
+
+# Each local engine's venv, worker and default voice. Anything not listed here is
+# a cloud engine, which has no warm-up to manage.
+LOCAL = {
+    "omnivoice": {
+        "venv": "venv-omnivoice",
+        "worker": "engines/omnivoice_worker.py",
+        # A voice-design description, not a name from a list. See the worker.
+        "voice": "male, american accent",
+        "speed": 1.0,
+    },
+    "kokoro": {
+        "venv": "venv-kokoro",
+        "worker": "engines/kokoro_worker.py",
+        "voice": KOKORO_VOICE,
+        "speed": KOKORO_SPEED,
+    },
+}
 
 
-def _serve():
-    """Own a loaded Kokoro model and answer synth requests over a unix socket.
+def _serve(engine):
+    """Own one loaded model and answer synth requests over a unix socket.
 
     One request per connection, JSON in and JSON out, mirroring the worker's own
-    line protocol. Started on demand by `_kokoro`; never run by hand.
+    line protocol. Started on demand by `_local`; never run by hand.
     """
+    spec = LOCAL[engine]
+    sock, lock_path, log_path = _sock(engine), _lock(engine), _daemon_log(engine)
     os.makedirs(STATE, exist_ok=True)
     # Only one daemon may own the socket, and now that voice mode is per session
     # several conversations can race to start one. The loser must exit rather
     # than unlink a live socket out from under the winner. The lock is held for
     # the whole run and released when the process ends.
-    lock = open(LOCK, "a+")
+    lock = open(lock_path, "a+")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         return  # another daemon already owns it
-    if os.path.exists(SOCK):
-        os.unlink(SOCK)
+    if os.path.exists(sock):
+        os.unlink(sock)
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    srv.bind(SOCK)
+    srv.bind(sock)
     srv.listen(4)
     srv.settimeout(IDLE_EXIT_SECONDS)
 
-    log = open(DAEMON_LOG, "ab")
+    log = open(log_path, "ab")
     worker = subprocess.Popen(
-        [f"{BAKE}/venv-kokoro/bin/python", f"{BAKE}/engines/kokoro_worker.py"],
+        [f"{BAKE}/{spec['venv']}/bin/python", f"{BAKE}/{spec['worker']}"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log,
         text=True, bufsize=1,
     )
@@ -145,8 +181,8 @@ def _serve():
     if not select.select([worker.stdout], [], [], MODEL_LOAD_TIMEOUT)[0] \
             or not worker.stdout.readline():
         worker.terminate()
-        os.unlink(SOCK)
-        raise SystemExit("kokoro worker never finished loading; see " + DAEMON_LOG)
+        os.unlink(sock)
+        raise SystemExit(f"{engine} worker never finished loading; see {log_path}")
 
     try:
         while True:
@@ -183,77 +219,85 @@ def _serve():
     finally:
         worker.terminate()
         srv.close()
-        if os.path.exists(SOCK):
-            os.unlink(SOCK)
+        if os.path.exists(sock):
+            os.unlink(sock)
 
 
-def _ask_daemon(req):
+def _ask_daemon(engine, req):
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as c:
         c.settimeout(120)
-        c.connect(SOCK)
+        c.connect(_sock(engine))
         c.sendall((json.dumps(req) + "\n").encode())
         try:
             return json.loads(c.makefile("r").readline())
         except (socket.timeout, ValueError) as e:
             # Surfaced as a RuntimeError so it prints as one `say:` line rather
             # than a traceback, the same as every other failure here.
-            raise RuntimeError(f"kokoro daemon gave no usable reply: {e}")
+            raise RuntimeError(f"{engine} daemon gave no usable reply: {e}")
 
 
-def _start_daemon():
+def _start_daemon(engine):
     os.makedirs(STATE, exist_ok=True)
-    log = open(DAEMON_LOG, "ab")
-    subprocess.Popen([sys.executable, os.path.abspath(__file__), "--serve"],
+    log = open(_daemon_log(engine), "ab")
+    subprocess.Popen([sys.executable, os.path.abspath(__file__), "--serve", engine],
                      stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                      start_new_session=True)
     deadline = time.time() + MODEL_LOAD_TIMEOUT
     while time.time() < deadline:
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as c:
-                c.connect(SOCK)
+                c.connect(_sock(engine))
             return
         except OSError:
             time.sleep(0.1)
-    raise RuntimeError(f"kokoro daemon did not come up in {MODEL_LOAD_TIMEOUT}s; see {DAEMON_LOG}")
+    raise RuntimeError(f"{engine} daemon did not come up in {MODEL_LOAD_TIMEOUT}s; "
+                       f"see {_daemon_log(engine)}")
 
 
-def _kokoro(text, out, voice, speed):
+def _local(engine, text, out, voice, speed):
+    """Synthesize through a warm daemon, starting one if there is not one yet."""
     req = {"text": text, "out": out, "voice": voice, "speed": speed}
     try:
-        r = _ask_daemon(req)
+        r = _ask_daemon(engine, req)
     except (FileNotFoundError, ConnectionError):
         # ConnectionError rather than just refused: a socket left behind by a
         # daemon that died mid-request answers the connect and then resets.
-        _start_daemon()
+        _start_daemon(engine)
         try:
-            r = _ask_daemon(req)
+            r = _ask_daemon(engine, req)
         except (FileNotFoundError, ConnectionError) as e:
             # It answered the connect probe and then went away, so report it the
             # same way as any other failure rather than as a bare socket error.
-            raise RuntimeError(f"kokoro daemon died right after starting: {e}")
+            raise RuntimeError(f"{engine} daemon died right after starting: {e}")
     if not r.get("ok"):
-        raise RuntimeError(f"kokoro: {r.get('error')}")
+        raise RuntimeError(f"{engine}: {r.get('error')}")
     return out
 
 
 def shutdown_daemon():
-    """Kill the warm daemon and remove its socket, freeing the loaded model.
+    """Kill every warm daemon and remove its socket, freeing the loaded models.
 
-    Signals rather than asks: the daemon spends its life blocked in accept(),
-    so there is no request that would make it return.
+    Signals rather than asks: a daemon spends its life blocked in accept(), so
+    there is no request that would make it return.
 
-    The socket is only removed once a daemon was actually signalled. Removing it
+    A socket is only removed once its daemon was actually signalled. Removing it
     otherwise would strand a live daemon: still running, still holding the lock,
     but with no socket for anyone to reach it through, so no session could speak
     and no replacement could start.
     """
-    if not os.path.exists(SOCK):
-        return False
-    killed = subprocess.run(["pkill", "-f", f"{os.path.abspath(__file__)} --serve"],
-                            check=False).returncode == 0
-    if killed and os.path.exists(SOCK):
-        os.unlink(SOCK)
-    return killed
+    killed_any = False
+    for engine in LOCAL:
+        sock = _sock(engine)
+        if not os.path.exists(sock):
+            continue
+        killed = subprocess.run(
+            ["pkill", "-f", f"{os.path.abspath(__file__)} --serve {engine}"],
+            check=False).returncode == 0
+        if killed:
+            killed_any = True
+            if os.path.exists(sock):
+                os.unlink(sock)
+    return killed_any
 
 
 # --- cloud engines -------------------------------------------------------
@@ -348,7 +392,8 @@ def _fix_wav_header(path):
 
 
 ENGINES = {
-    "kokoro": (_kokoro, DEFAULT_VOICE),
+    "omnivoice": (functools.partial(_local, "omnivoice"), LOCAL["omnivoice"]["voice"]),
+    "kokoro": (functools.partial(_local, "kokoro"), LOCAL["kokoro"]["voice"]),
     "cartesia": (_cartesia, "6f84f4b8-58a2-430c-8c79-688dad597532"),
     "deepgram": (_deepgram, "aura-2-thalia-en"),
     "openai": (_openai, "marin"),
@@ -464,14 +509,24 @@ def release_speaker():
         pass
 
 
-# Kokoro renders roughly 2.6x faster than realtime, so rendering a whole
-# utterance before playing any of it cost 13.7s of silence on a 123-word one
-# (measured 2026-07-31). Rendering in chunks and playing the first while the rest
-# is still being made turns that into the cost of the first chunk alone. The
-# first is kept short for exactly that reason; later ones are larger because by
-# then the renderer is comfortably ahead of the player.
+# Rendering a whole utterance before playing any of it cost 13.7s of silence on a
+# 123-word one under Kokoro (measured 2026-07-31). Rendering in chunks and playing
+# the first while the rest is still being made turns that into the cost of the
+# first chunk alone. The first is kept short for exactly that reason; later ones
+# are larger because by then the renderer is comfortably ahead of the player.
+#
+# The right sizes differ by engine, so each local one carries its own.
+# Kokoro is roughly linear at ~2.6x realtime, so small chunks cost it nothing.
+# OmniVoice is a diffusion model whose cost grows faster than its input: measured
+# 2026-08-25 on the 2080 Ti at 16 steps, 78 words rendered in 2.7s but 156 words
+# took 13.6s. So its chunks are much larger than Kokoro's, to clear the fixed
+# per-call cost, and capped well short of where the curve turns against us.
 FIRST_CHUNK_WORDS = 15
 CHUNK_WORDS = 50
+CHUNK_SIZES = {
+    "omnivoice": (35, 75),
+    "kokoro": (FIRST_CHUNK_WORDS, CHUNK_WORDS),
+}
 
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 
@@ -541,8 +596,74 @@ def _play_chunks_windows(work, count):
         "  if (Test-Path $wav) { (New-Object Media.SoundPlayer $wav).PlaySync() }\n"
         "}\n"
     ) % (win.replace("'", "''"), count)
+    # stderr is inherited rather than discarded. A player that cannot open the
+    # device is otherwise indistinguishable from a turn that had nothing to say,
+    # and the caller already routes our stderr to a log.
     subprocess.run([POWERSHELL, "-NoProfile", "-Command", script],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                   stdout=subprocess.DEVNULL)
+
+
+# Windows keeps three separate "default" output devices, one per role, and moves
+# them independently: plugging in a headset can take the communications role and
+# leave music behind on the speakers. `Media.SoundPlayer` follows eConsole, so a
+# split like that sounds exactly like playback being broken, with no error
+# anywhere. Nothing in WSL can read this, so ask Windows through the same COM
+# interface the sound control panel uses.
+_ENDPOINTS_PS = r"""
+Add-Type -TypeDefinition @'
+using System;using System.Runtime.InteropServices;
+[ComImport,Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")] class EnumComObject{}
+[Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IMMDeviceEnumerator{int NotImpl1();int GetDefaultAudioEndpoint(int flow,int role,out IMMDevice dev);}
+[Guid("D666063F-1587-4E43-81F1-B948E807363F"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IMMDevice{int Activate(ref Guid i,int c,IntPtr p,out IntPtr o);int OpenPropertyStore(int a,out IPropertyStore ps);}
+[Guid("886d8eeb-8cf2-4446-8d02-cdba1dbdcf99"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IPropertyStore{int GetCount(out int c);int GetAt(int i,out PropertyKey k);int GetValue(ref PropertyKey k,out PropVariant v);}
+[StructLayout(LayoutKind.Sequential)] struct PropertyKey{public Guid fmtid;public int pid;}
+[StructLayout(LayoutKind.Explicit)] struct PropVariant{[FieldOffset(0)]public short vt;[FieldOffset(8)]public IntPtr p;}
+public class Endpoints{
+ public static string Get(int role){
+  var e=(IMMDeviceEnumerator)(new EnumComObject());
+  IMMDevice d; if(e.GetDefaultAudioEndpoint(0,role,out d)!=0) return "(none)";
+  IPropertyStore ps; d.OpenPropertyStore(0,out ps);
+  var k=new PropertyKey(); k.fmtid=new Guid("a45c254e-df1c-4efd-8020-67d146a850e0"); k.pid=14;
+  PropVariant v; ps.GetValue(ref k,out v);
+  return Marshal.PtrToStringUni(v.p);
+ }}
+'@
+'console|' + [Endpoints]::Get(0)
+'multimedia|' + [Endpoints]::Get(1)
+'communications|' + [Endpoints]::Get(2)
+"""
+
+
+def report_endpoints():
+    """Print which device Windows hands each audio role, and flag a split.
+
+    Run this first when a turn goes silent: it separates "we never made a sound"
+    from "the sound went somewhere you are not listening to".
+    """
+    if not use_windows_player():
+        print("say: not WSL, so playback goes through paplay and this does not apply")
+        return 0
+    ps = subprocess.run([POWERSHELL, "-NoProfile", "-Command", _ENDPOINTS_PS],
+                        capture_output=True, text=True)
+    roles = {}
+    for line in ps.stdout.splitlines():
+        role, _, name = line.strip().partition("|")
+        if name:
+            roles[role] = name
+    if not roles:
+        print("say: could not read Windows audio endpoints")
+        print(ps.stderr.strip(), file=sys.stderr)
+        return 1
+    for role, name in roles.items():
+        # The player follows the console role, so name the one that matters.
+        print("%-15s %s%s" % (role, name, "   <- what we play to" if role == "console" else ""))
+    if len(set(roles.values())) > 1:
+        print("\nsay: these disagree, so audio can land on a device you are not wearing.")
+        print("Set the console default in Windows sound settings to the one you want.")
+    return 0
 
 
 def _play_chunks_paplay(work, count):
@@ -556,18 +677,17 @@ def _play_chunks_paplay(work, count):
             time.sleep(0.02)
         wav = os.path.join(work, "chunk-%d.wav" % i)
         if os.path.exists(wav):
-            subprocess.run(["paplay", wav],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["paplay", wav], stdout=subprocess.DEVNULL)
 
 
-def speak(text, synth, voice, speed, pad):
+def speak(text, synth, voice, speed, pad, sizes=(FIRST_CHUNK_WORDS, CHUNK_WORDS)):
     """Say the text, starting playback before the whole thing has been rendered.
 
     Rendering runs in a thread so it can stay ahead of the player. Both die with
     the process, which is what a barge-in signals, so neither needs its own
     shutdown path.
     """
-    chunks = chunk_text(text)
+    chunks = chunk_text(text, *sizes)
     if not chunks:
         return
     # Per process, not one shared directory. A barge-in signals the previous run
@@ -619,9 +739,10 @@ def _clear_dead_streams():
 def main():
     ap = argparse.ArgumentParser(description="Speak text through a bake-off TTS engine.")
     ap.add_argument("text", nargs="*", help="text to speak; omit to read stdin")
-    ap.add_argument("--engine", default="kokoro", choices=sorted(ENGINES))
+    ap.add_argument("--engine", default=DEFAULT_ENGINE, choices=sorted(ENGINES))
     ap.add_argument("--voice", default=None, help="engine-specific voice or model id")
-    ap.add_argument("--speed", type=float, default=DEFAULT_SPEED, help="Kokoro only")
+    ap.add_argument("--speed", type=float, default=None,
+                    help="speech rate; local engines only, each with its own default")
     ap.add_argument("--out", default=DEFAULT_OUT,
                     help="where to write the WAV; only used with --no-play, since "
                          "playing renders in chunks rather than one file")
@@ -630,14 +751,19 @@ def main():
     ap.add_argument("--raw", action="store_true", help="skip the markdown sanitizer")
     ap.add_argument("--pad", type=float, default=0.7,
                     help="seconds of leading silence; raise if a first word goes missing")
+    ap.add_argument("--devices", action="store_true",
+                    help="report which device Windows sends each audio role to")
     ap.add_argument("--stop", action="store_true", help="cut off playback and exit")
     ap.add_argument("--shutdown", action="store_true", help="also drop the warm model")
-    ap.add_argument("--serve", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--serve", default=None, choices=sorted(LOCAL), help=argparse.SUPPRESS)
     args = ap.parse_args()
 
     if args.serve:
-        _serve()
+        _serve(args.serve)
         return 0
+
+    if args.devices:
+        return report_endpoints()
 
     if args.stop or args.shutdown:
         os.makedirs(STATE, exist_ok=True)
@@ -662,13 +788,17 @@ def main():
     try:
         synth, default_voice = ENGINES[args.engine]
         voice = args.voice or default_voice
+        speed = args.speed
+        if speed is None:
+            speed = LOCAL.get(args.engine, {}).get("speed", 1.0)
+        sizes = CHUNK_SIZES.get(args.engine, (FIRST_CHUNK_WORDS, CHUNK_WORDS))
         if args.no_play:
             os.makedirs(os.path.dirname(os.path.abspath(args.out)) or ".", exist_ok=True)
-            out = synth(text, args.out, voice, args.speed)
+            out = synth(text, args.out, voice, speed)
             if args.pad > 0:
                 pad_silence(out, args.pad)
         else:
-            speak(text, synth, voice, args.speed, args.pad)
+            speak(text, synth, voice, speed, args.pad, sizes)
     finally:
         release_speaker()
     return 0
