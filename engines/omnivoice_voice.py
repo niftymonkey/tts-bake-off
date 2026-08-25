@@ -73,7 +73,7 @@ def bake(args):
     # would write a file nothing ever loads.
     if not args.out.endswith(".pt"):
         raise SystemExit(f"--out must end in .pt, got {args.out}")
-    text = args.text
+    text = args.text.strip() if args.text else None
     if not text:
         side = f"{args.wav}.txt"
         if os.path.exists(side):

@@ -137,7 +137,12 @@ OMNIVOICE_DESIGN = "male, american accent"
 
 
 def _omnivoice_voice():
-    return OMNIVOICE_PROMPT if os.path.exists(OMNIVOICE_PROMPT) else OMNIVOICE_DESIGN
+    # The .pt test has to match the worker's, which is how it tells a prompt path
+    # from a description. Agreeing only on existence would let a differently-named
+    # file through here and be read as a description there.
+    if OMNIVOICE_PROMPT.endswith(".pt") and os.path.exists(OMNIVOICE_PROMPT):
+        return OMNIVOICE_PROMPT
+    return OMNIVOICE_DESIGN
 
 
 # Each local engine's venv, worker and default voice. Anything not listed here is
