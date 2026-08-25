@@ -69,6 +69,10 @@ def audition(args):
 
 
 def bake(args):
+    # The worker recognises a baked speaker by its .pt suffix, so any other name
+    # would write a file nothing ever loads.
+    if not args.out.endswith(".pt"):
+        raise SystemExit(f"--out must end in .pt, got {args.out}")
     text = args.text
     if not text:
         side = f"{args.wav}.txt"

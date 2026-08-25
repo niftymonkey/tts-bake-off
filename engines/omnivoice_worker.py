@@ -65,9 +65,15 @@ while True:
         req = json.loads(line)
         voice = req.get("voice") or "male, american accent"
         # A path means a baked speaker; anything else is a design description.
-        style = ({"voice_clone_prompt": _prompt(voice)}
-                 if voice.endswith(".pt") and os.path.exists(voice)
-                 else {"instruct": voice})
+        # A missing prompt file is an error rather than a fallback: falling back
+        # to design mode would quietly reinstate the drifting voice it exists to
+        # prevent, and sound like nothing was wrong.
+        if voice.endswith(".pt"):
+            if not os.path.exists(voice):
+                raise FileNotFoundError(f"voice-clone prompt not found: {voice}")
+            style = {"voice_clone_prompt": _prompt(voice)}
+        else:
+            style = {"instruct": voice}
         audio = model.generate(
             text=req["text"],
             speed=float(req.get("speed", 1.0)),

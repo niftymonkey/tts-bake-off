@@ -50,6 +50,13 @@ class Kokoro:
         if not self.proc.stdout.readline():
             raise RuntimeError("kokoro worker exited during load")
 
+    def close(self):
+        """Take the worker down with the TUI, rather than leaving it warm."""
+        if self.proc is not None and self.proc.poll() is None:
+            self.proc.terminate()
+            self.proc.wait()
+        self.proc = None
+
     def synth(self, text, voice, speed):
         if self.proc is None or self.proc.poll() is not None:
             self._start()
@@ -183,6 +190,13 @@ def getkey():
 def main():
     state = State()
     kokoro = Kokoro()
+    try:
+        loop(state, kokoro)
+    finally:
+        kokoro.close()
+
+
+def loop(state, kokoro):
     render(state)
     while True:
         k = getkey()
