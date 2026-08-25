@@ -4,10 +4,10 @@ Same contract as kokoro_worker.py: load the model once, then read one JSON
 request per line from stdin and write one JSON response per line, with all
 library chatter pushed to stderr so stdout carries only the protocol.
 
-`voice` here is a voice-design description ("male, american accent") rather than
-a name from a fixed list. The seed is pinned because the description alone does
-not fully determine the speaker, and an utterance split across several requests
-has to come back in one voice.
+`voice` is either a path to a baked voice-clone prompt or a voice-design
+description ("male, american accent"). Prefer the prompt: design mode does not
+pin a speaker, so each request invents a new one and a reply split across
+requests comes back in several voices. `engines/omnivoice_voice.py` bakes one.
 
 Request:  {"text": str, "out": str, "voice": str, "speed": float}
 Response: {"ready": true}  on startup, then {"ok": bool, "out"/"error": str}
@@ -35,12 +35,23 @@ SAMPLE_RATE = 24000
 # default precision would run emulated. float16 was checked for NaNs and clipping
 # on this card before being chosen.
 DTYPE = torch.float16
-VOICE_SEED = 42
 # Diffusion steps. The project's own default is 32; 16 is its documented "faster"
 # setting and measured ~1.6x quicker on this card at the chunk sizes say.py uses.
 NUM_STEP = int(os.environ.get("OMNIVOICE_STEPS", 16))
 
 model = OmniVoice.from_pretrained(MODEL, device_map="cuda:0", dtype=DTYPE)
+
+# Loading a prompt costs a `torch.load`, so keep each one for the daemon's life.
+_prompts = {}
+
+
+def _prompt(path):
+    if path not in _prompts:
+        from omnivoice.models.omnivoice import VoiceClonePrompt
+        _prompts[path] = VoiceClonePrompt.load(path)
+    return _prompts[path]
+
+
 emit({"ready": True})
 
 while True:
@@ -52,12 +63,16 @@ while True:
         continue
     try:
         req = json.loads(line)
+        voice = req.get("voice") or "male, american accent"
+        # A path means a baked speaker; anything else is a design description.
+        style = ({"voice_clone_prompt": _prompt(voice)}
+                 if voice.endswith(".pt") and os.path.exists(voice)
+                 else {"instruct": voice})
         audio = model.generate(
             text=req["text"],
-            instruct=req.get("voice") or "male, american accent",
             speed=float(req.get("speed", 1.0)),
-            seed=VOICE_SEED,
             num_step=NUM_STEP,
+            **style,
         )
         sf.write(req["out"], audio[0], SAMPLE_RATE)
         emit({"ok": True, "out": req["out"]})

@@ -126,14 +126,27 @@ def pad_silence(path, seconds=0.7):
 
 # --- warm local-engine daemons -------------------------------------------
 
+# OmniVoice takes a voice-design description rather than a name from a list, but
+# a description does not pin a speaker: `generate()` has no seed, so every call
+# invents a new one and a reply split into chunks comes back in several voices.
+# A baked voice-clone prompt does pin it. `engines/omnivoice_voice.py` writes one
+# here; until it exists, fall back to the description.
+OMNIVOICE_PROMPT = (os.environ.get("OMNIVOICE_VOICE_PROMPT")
+                    or f"{STATE}/omnivoice-voice.pt")
+OMNIVOICE_DESIGN = "male, american accent"
+
+
+def _omnivoice_voice():
+    return OMNIVOICE_PROMPT if os.path.exists(OMNIVOICE_PROMPT) else OMNIVOICE_DESIGN
+
+
 # Each local engine's venv, worker and default voice. Anything not listed here is
 # a cloud engine, which has no warm-up to manage.
 LOCAL = {
     "omnivoice": {
         "venv": "venv-omnivoice",
         "worker": "engines/omnivoice_worker.py",
-        # A voice-design description, not a name from a list. See the worker.
-        "voice": "male, american accent",
+        "voice": _omnivoice_voice(),
         "speed": 1.0,
     },
     "kokoro": {
